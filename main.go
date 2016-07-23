@@ -6,6 +6,7 @@ import (
   "fmt"
   "github.com/nu7hatch/gouuid" //UUID Generator
   "menteslibres.net/gosexy/redis" // Redis client.
+  "github.com/asaskevich/govalidator" // Library to check URLs and other such are valid.
 )
 
 var rediscon *redis.Client
@@ -60,7 +61,7 @@ type SuccessSaving struct {
 type ErrorSaving struct {
   Status    string
   Code		int
-  Additional	string
+  Error	string
 }
 
 type Job struct {
@@ -75,15 +76,21 @@ type Job struct {
 
 func save(w http.ResponseWriter, r *http.Request) {
 	//Queues a URL up for saving to disk. Once this has been confirmed ok, the file can be assumed saved.
+	/*
+	Errors that can be returned:
+	invalid-json: The JSON posted to the server was not valid JSON.
+	not-url: The URL submitted to be archived did not look like a URL.
+	not-allowed: We will not archive URLs at this domain. (Will also return an HTTP status code of 403 forbidden)
+	*/
 
 	//Decode the request body.
 	decoder := json.NewDecoder(r.Body)
 	var gr GrabRequest
 	err := decoder.Decode(&gr)
 	
-	if err != nil{
+	if gr.Url == "" || err != nil{
 		//If there was an error deconding the JSON
-		response := ErrorSaving{"error", 400, "Invalid json!"}
+		response := ErrorSaving{"error", 400, "invalid-json"}
 		js, err := json.Marshal(response)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -94,32 +101,44 @@ func save(w http.ResponseWriter, r *http.Request) {
  	} else{
 		//JSON decoded and valid, now add it to the queue.
 		
-		//Generate a new UUID for this job.
-		rid, err := uuid.NewV4()
-		
-		// //Put the job on the redis pub/sub queue and set its status in Redis.
-		jobInfo := Job{rid.String(), gr.Url, r.RemoteAddr}
-		pushthis, err := json.Marshal(jobInfo)
-		rediscon.LPush("jobs", pushthis)
-		fmt.Println("Pushed task to Redis!")
-		
-		//Set the item's status in Redis.
-		rediscon.Set("status:"+rid.String(), "in-queue")
-		fmt.Println("Set the job status for status:"+rid.String()+" in Redis")
-		
-		
-		
-	  //Tell the waiting client all about it.
-	  response := SuccessSaving{"ok", 200, "The address "+gr.Url+" has been added to the queue.", rid.String()}
+		if govalidator.IsURL(gr.Url){
+			//Generate a new UUID for this job.
+			rid, err := uuid.NewV4()
+			
+			// //Put the job on the redis pub/sub queue and set its status in Redis.
+			jobInfo := Job{rid.String(), gr.Url, r.RemoteAddr}
+			pushthis, err := json.Marshal(jobInfo)
+			rediscon.LPush("jobs", pushthis)
+			fmt.Println("Pushed task to Redis!")
+			
+			//Set the item's status in Redis.
+			rediscon.Set("status:"+rid.String(), "in-queue")
+			fmt.Println("Set the job status for status:"+rid.String()+" in Redis")
+			
+			
+			
+		  //Tell the waiting client all about it.
+		  response := SuccessSaving{"ok", 200, "The address "+gr.Url+" has been added to the queue.", rid.String()}
 
-	  js, err := json.Marshal(response)
-	  if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	  }
-	  
-	    w.Header().Set("Content-Type", "application/json")
-		w.Write(js)
+		  js, err := json.Marshal(response)
+		  if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		  }
+		  
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(js)
+		}else{
+			//The URL requested to be archived was not valid.
+			response := ErrorSaving{"error", 400, "not-url"}
+			js, err := json.Marshal(response)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(js)
+		}
 	}
 }
 
@@ -141,8 +160,8 @@ func progress(w http.ResponseWriter, r *http.Request) {
 	waiting-deep-freezing: This png file is saved and accessable, but is waiting to be deep-freezed (zopfli).
 	deep-freezing: The png file is in the process of being deep freezed with zopfli.
 	
-	unknown-job: The UUID is invalid or this job finished more than an hour ago. Consult Find to find it.
-	saved: The image / webpage was saved successfully.
+	unknown-job: The UUID is invalid or this job finished more than an hour ago. Consult Find to find it if you're sure it existed.
+	saved: The image / webpage was saved successfully within the last hour.
 	*/
 	fmt.Println("Recieved progress request.")
 	//Decode the request body.
